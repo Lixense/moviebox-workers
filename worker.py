@@ -207,6 +207,7 @@ def pick_from_queue():
 # ============================== MOVIEBOX API ==============================
 MB_KEY = base64.urlsafe_b64decode("76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O==")
 MB_BASES = ["https://api6.aoneroom.com", "https://api5.aoneroom.com", "https://api4.aoneroom.com"]
+MB_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjIwOTI2Mjc0MjUzNjMzODUwNDgsImV4cCI6MTc5NzUwOTcxOSwiaWF0IjoxNzg5NzMzNDE5fQ.lk5GbDkDTlP3kuw1LgLmuRhsrF1ugN8BvQrZFb_HqQo"
 
 def _dev():
     brands = [("Samsung","SM-G991B"),("Samsung","SM-A536B"),("Xiaomi","M2102J20SG"),
@@ -245,10 +246,9 @@ def _sign(method, url, body=None):
 
 def _hdr(method, url, body=None):
     ts, sig = _sign(method, url, body)
-    ts2 = str(int(time.time()*1000))
     h = {"X-Play-Mode":"1","X-Client-Info":json.dumps(DEV,separators=(",",":")),"X-Client-Status":"1",
          "x-tr-signature":f"{ts}|2|{sig}",
-         "X-Client-Token":f"{ts2},{hashlib.md5(ts2[::-1].encode()).hexdigest()}",
+         "Authorization":f"Bearer {MB_JWT}",
          "User-Agent":"okhttp/4.12.0"}
     if body: h["Content-Type"] = "application/json; charset=UTF-8"
     return h
@@ -281,7 +281,7 @@ def mb_dub(sid): return mb_get("/wefeed-mobile-bff/subject-api/dub-info", {"subj
 def mb_resource(sid, se, ep, res=1080):
     return mb_get("/wefeed-mobile-bff/subject-api/resource",
                   {"subjectId":str(sid),"resolution":str(res),"se":str(se),
-                   "epFrom":str(ep),"epTo":str(ep),"page":"1","perPage":"50",
+                   "epFrom":str(ep),"epTo":str(ep),"page":"1","perPage":"20",
                    "all":"0","startPosition":"1","endPosition":"1","pagerMode":"0"})
 
 def get_arabic_id(sid):
@@ -379,7 +379,7 @@ def process_title(subject_id, claim_sha):
 
     # Get Arabic title label from resource endpoint
     arabic_title = ""
-    res_check = mb_resource(arabic_id, 1, 1, 1, QUALITY)
+    res_check = mb_resource(arabic_id, 1, 1, QUALITY)
     if res_check and "data" in res_check:
         arabic_title = res_check["data"].get("subjectTitle", "")
         total_size = res_check["data"].get("totalSize", "0")
