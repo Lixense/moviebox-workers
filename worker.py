@@ -168,6 +168,29 @@ def get_queue():
         return [], None
     return data.get("pending", []), sha
 
+def get_blacklist():
+    """Read blacklist.json — subject_ids that have no downloadable source, never re-claim."""
+    data, _ = gh_read("blacklist.json")
+    if data is None:
+        return {}
+    return data.get("ids", {})
+
+def add_to_blacklist(subject_id, title=None, ttype=None, reason=""):
+    """Add a subject to blacklist so it's never re-claimed. Retries on conflict."""
+    for _ in range(5):
+        data, sha = gh_read("blacklist.json")
+        if data is None:
+            data = {"ids": {}}
+            sha = None
+        data["ids"][str(subject_id)] = {
+            "title": title or "", "type": ttype or "",
+            "reason": reason, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        result = gh_write("blacklist.json", data, sha=sha, msg=f"{WORKER_ID} blacklists {subject_id}")
+        if result is not None:
+            return
+        time.sleep(random.uniform(0.5, 2))
+
 def add_to_queue(subject_ids):
     data, sha = gh_read("queue.json")
     if data is None:
@@ -175,7 +198,8 @@ def add_to_queue(subject_ids):
         sha = None
     existing_q = set(data["pending"])
     known = {f["name"].replace(".json", "") for f in gh_list_dir("titles")}
-    new = [s for s in subject_ids if s not in existing_q and s not in known]
+    blacklist = set(get_blacklist().keys())
+    new = [s for s in subject_ids if s not in existing_q and s not in known and s not in blacklist]
     if not new:
         return 0
     data["pending"].extend(new)
@@ -190,7 +214,7 @@ def add_to_queue(subject_ids):
             data = {"pending": []}
             sha = None
         existing_q = set(data["pending"])
-        new = [s for s in subject_ids if s not in existing_q and s not in known]
+        new = [s for s in subject_ids if s not in existing_q and s not in known and s not in blacklist]
         data["pending"].extend(new)
     return 0
 
@@ -202,6 +226,8 @@ def remove_from_queue(subject_id):
 
 def pick_from_queue():
     queue, _ = get_queue()
+    blacklist = set(get_blacklist().keys())
+    queue = [s for s in queue if s not in blacklist]
     random.shuffle(queue)
     for sid in queue:
         claim_sha = try_claim(sid)
@@ -503,7 +529,6 @@ def process_title(subject_id, claim_sha):
             sl = sd["data"].get("seasons", [sd["data"]] if isinstance(sd["data"], dict) else [])
             for s in sl:
                 se = s.get("se", 1)
-                # Ask the resource API what's REALLY available
                 available = mb_resource_all(arabic_id, se, QUALITY)
                 if not available:
                     log(f"  S{se}: no {QUALITY}p episodes available")
@@ -514,9 +539,26 @@ def process_title(subject_id, claim_sha):
                     eps.append((se, e))
                 season_info.append({"season": se, "episodes": ep_nums})
                 log(f"  S{se}: {len(ep_nums)} episodes available")
-    if not eps:
-        eps = [(1, 1)]
-        season_info = [{"season": 1, "episodes": [1]}]
+    else:
+        # Movie: probe directly first — cheap way to detect "no source" before wasting IA calls
+        probe = mb_resource_all(arabic_id, 1, QUALITY)
+        if probe and 1 in probe:
+            season_resources_cache[1] = probe
+            eps = [(1, 1)]
+            season_info = [{"season": 1, "episodes": [1]}]
+
+    # No sources anywhere — blacklist and bail without touching IA
+    if not eps or not season_resources_cache:
+        log(f"  {tname}: no downloadable sources — blacklisting")
+        add_to_blacklist(subject_id, tname, ttype, "no_source_at_all")
+        # Delete title file (drops the claim)
+        _, sha0 = gh_read(f"titles/{subject_id}.json")
+        if sha0:
+            req_lib.delete(f"{GH}/repos/{DB_REPO}/contents/titles/{subject_id}.json",
+                           headers=GH_H,
+                           json={"message": f"{WORKER_ID} blacklists {subject_id}", "sha": sha0},
+                           timeout=30)
+        return
 
     # Reserve archive ID
     aid = mk_aid()
@@ -529,7 +571,11 @@ def process_title(subject_id, claim_sha):
 
     title_data = {
         "subject_id": subject_id, "arabic_id": arabic_id, "archive_id": aid,
-        "title": tname, "type": ttype, "account": IA_ACCOUNT,
+        "title": tname, "title_arabic": arabic_title, "type": ttype,
+        "description": description, "genre": genre, "country": country,
+        "language": language, "imdb_rating": imdb, "release_date": release_date,
+        "cover_url": cover_url, "staff": staff,
+        "account": IA_ACCOUNT,
         "status": "processing", "worker": WORKER_ID, "episodes": ep_dict,
         "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -653,9 +699,33 @@ def process_title(subject_id, claim_sha):
     data, sha = gh_read(f"titles/{subject_id}.json")
     if data:
         ae = data.get("episodes", {})
-        data["status"] = "done" if all(e.get("status") in ("uploaded","no_source","no_link") for e in ae.values()) else "partial"
-        data["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        save_title(subject_id, data, sha)
+        uploaded = [e for e in ae.values() if e.get("status") == "uploaded"]
+        # If NOTHING actually got uploaded, drop the title entirely + blacklist
+        if not uploaded:
+            log(f"  {tname}: no episodes actually uploaded — removing + blacklisting")
+            add_to_blacklist(subject_id, tname, ttype, "no_uploads")
+            req_lib.delete(f"{GH}/repos/{DB_REPO}/contents/titles/{subject_id}.json",
+                           headers=GH_H,
+                           json={"message": f"{WORKER_ID} drops empty {subject_id}", "sha": sha},
+                           timeout=30)
+            # Try to delete the empty archive.org item — remove all uploaded metadata files
+            try:
+                s = _ia()
+                item = s.get_item(aid)
+                item.refresh()
+                for f_ia in item.files:
+                    if not f_ia["name"].startswith("_") and "meta" not in f_ia["name"] and "torrent" not in f_ia["name"] and "thumb" not in f_ia["name"]:
+                        try:
+                            item.delete_file(f_ia["name"])
+                            log(f"    IA deleted {f_ia['name']}")
+                        except Exception:
+                            pass
+            except Exception as e:
+                log(f"    (couldn't clean IA item: {e})")
+        else:
+            data["status"] = "done" if all(e.get("status") in ("uploaded","no_source","no_link") for e in ae.values()) else "partial"
+            data["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            save_title(subject_id, data, sha)
 
     shutil.rmtree(tdir, ignore_errors=True)
     log(f"  {tname} complete!")
