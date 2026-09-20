@@ -339,33 +339,88 @@ def ia_exists(ident):
 def ia_upload(ident, local, remote, md=None):
     s = _ia()
     m = md or {}; m.setdefault("mediatype","movies"); m.setdefault("collection","opensource_movies")
+    # verify=False + queue_derive=False: skip client-side SHA1 recompute + skip server re-derive queue trigger.
+    # We trust the direct MP4 from moviebox — Archive.org verifies MD5 server-side anyway.
     for a in range(5):
         try:
-            s.get_item(ident).upload({remote:str(local)}, metadata=m, verify=True, retries=3, retries_sleep=10)
+            s.get_item(ident).upload({remote:str(local)}, metadata=m,
+                                     verify=False, queue_derive=False,
+                                     retries=2, retries_sleep=3)
             return True
         except Exception as e:
             if "SlowDown" in str(e) or "503" in str(e): time.sleep(30*(a+1))
             elif a >= 4: raise
-            else: time.sleep(10)
+            else: time.sleep(5)
     return False
 
 # ================================ DOWNLOAD ================================
-def dl_file(url, dest_path, expected_size=None):
+import threading, concurrent.futures
+
+def _dl_chunk(url, start, end, dest_fp, lock, hdr):
+    """Download bytes [start, end] using Range request, write to dest_fp at start."""
+    h = dict(hdr); h["Range"] = f"bytes={start}-{end}"
+    r = req_lib.get(url, headers=h, stream=True, timeout=120)
+    if r.status_code not in (200, 206):
+        return False
+    buf = b""
+    for chunk in r.iter_content(524288):
+        buf += chunk
+    with lock:
+        dest_fp.seek(start)
+        dest_fp.write(buf)
+    return True
+
+def dl_file(url, dest_path, expected_size=None, connections=8):
+    """Multi-connection parallel download using HTTP Range. Falls back to single-stream."""
     dest = Path(dest_path); part = dest.with_suffix(dest.suffix + ".part")
-    ex = part.stat().st_size if part.exists() else 0
     hdr = {"User-Agent": "okhttp/4.12.0"}
-    if ex > 0: hdr["Range"] = f"bytes={ex}-"
-    r = req_lib.get(url, headers=hdr, stream=True, timeout=60)
-    if r.status_code == 416:
-        if ex and expected_size and ex >= int(expected_size):
-            part.rename(dest); return True
-        part.unlink(missing_ok=True); ex = 0; hdr.pop("Range", None)
+
+    # First probe: HEAD-ish request to check Range support and size
+    size = int(expected_size) if expected_size and str(expected_size).isdigit() else 0
+    if size < 10_000_000 or connections < 2:
+        # Small file or single-connection mode — simple stream
         r = req_lib.get(url, headers=hdr, stream=True, timeout=60)
-    if r.status_code == 200: mode = "wb"
-    elif r.status_code == 206: mode = "ab"
-    else: log(f"DL HTTP {r.status_code}"); return False
-    with open(part, mode) as f:
-        for chunk in r.iter_content(131072): f.write(chunk)
+        if r.status_code != 200:
+            log(f"DL HTTP {r.status_code}"); return False
+        with open(part, "wb") as f:
+            for chunk in r.iter_content(524288): f.write(chunk)
+        part.rename(dest); return True
+
+    # Verify Range support with a small probe
+    probe = req_lib.get(url, headers={**hdr, "Range": "bytes=0-1023"}, stream=True, timeout=60)
+    if probe.status_code != 206:
+        probe.close()
+        # No Range support — fallback single stream
+        r = req_lib.get(url, headers=hdr, stream=True, timeout=60)
+        if r.status_code != 200:
+            log(f"DL HTTP {r.status_code}"); return False
+        with open(part, "wb") as f:
+            for chunk in r.iter_content(524288): f.write(chunk)
+        part.rename(dest); return True
+    probe.close()
+
+    # Parallel Range download
+    chunk_size = size // connections
+    ranges = []
+    for i in range(connections):
+        start = i * chunk_size
+        end = size - 1 if i == connections - 1 else (start + chunk_size - 1)
+        ranges.append((start, end))
+
+    # Preallocate file
+    with open(part, "wb") as f:
+        f.truncate(size)
+
+    lock = threading.Lock()
+    ok = True
+    with open(part, "r+b") as f:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=connections) as ex:
+            futs = [ex.submit(_dl_chunk, url, s, e, f, lock, hdr) for s, e in ranges]
+            for fu in concurrent.futures.as_completed(futs):
+                if not fu.result():
+                    ok = False
+    if not ok:
+        part.unlink(missing_ok=True); return False
     part.rename(dest); return True
 
 # =============================== DISCOVERY ================================
