@@ -278,11 +278,46 @@ def mb_catalog(page=1): return mb_post("/wefeed-mobile-bff/subject-api/list", {"
 def mb_detail(sid): return mb_get("/wefeed-mobile-bff/subject-api/get", {"subjectId":str(sid)})
 def mb_seasons(sid): return mb_get("/wefeed-mobile-bff/subject-api/season-info", {"subjectId":str(sid)})
 def mb_dub(sid): return mb_get("/wefeed-mobile-bff/subject-api/dub-info", {"subjectId":str(sid),"episodeId":"0"})
+def mb_resource_all(sid, se, res=1080, max_ep=200):
+    """Fetch ALL episodes of one season by paging in chunks of 20. Returns dict {ep_num: resource}.
+    Filters client-side by actual `se` field — the API sometimes returns other seasons."""
+    out = {}
+    ep_from = 1
+    CHUNK = 20
+    seen_any_correct = False
+    consecutive_empty = 0
+    while ep_from <= max_ep:
+        ep_to = ep_from + CHUNK - 1
+        r = mb_get("/wefeed-mobile-bff/subject-api/resource",
+                   {"subjectId":str(sid),"resolution":str(res),"se":str(se),
+                    "epFrom":str(ep_from),"epTo":str(ep_to),"page":"1","perPage":"20",
+                    "all":"1","startPosition":str(ep_from),"endPosition":str(ep_to),"pagerMode":"0"})
+        if not r or "data" not in r:
+            break
+        items = r["data"].get("list", [])
+        if not items:
+            break
+        matching = [it for it in items if int(it.get("se", 0)) == int(se)]
+        for item in matching:
+            out[int(item.get("ep", 0))] = item
+        if matching:
+            seen_any_correct = True
+            consecutive_empty = 0
+        else:
+            consecutive_empty += 1
+            if consecutive_empty >= 2 and seen_any_correct:
+                break
+        if len(items) < CHUNK:
+            break
+        ep_from += CHUNK
+    return out
+
 def mb_resource(sid, se, ep, res=1080):
-    return mb_get("/wefeed-mobile-bff/subject-api/resource",
-                  {"subjectId":str(sid),"resolution":str(res),"se":str(se),
-                   "epFrom":str(ep),"epTo":str(ep),"page":"1","perPage":"20",
-                   "all":"0","startPosition":"1","endPosition":"1","pagerMode":"0"})
+    """Fetch a single episode. Uses all=1 because all=0 always returns E01."""
+    eps = mb_resource_all(sid, se, res, max_ep=99)
+    if ep in eps:
+        return {"data": {"list": [eps[ep]]}}
+    return None
 
 def get_arabic_id(sid):
     data = mb_dub(sid)
@@ -388,28 +423,28 @@ def process_title(subject_id, claim_sha):
         total_size = "0"
         total_eps_api = 0
 
-    # Seasons and episodes
+    # Seasons and episodes — authoritative source is mb_resource_all per season,
+    # not season-info (which lies about episode counts for many shows).
     eps = []
     season_info = []
+    season_resources_cache = {}
     if ttype == "series":
         sd = mb_seasons(arabic_id)
         if sd and "data" in sd:
             sl = sd["data"].get("seasons", [sd["data"]] if isinstance(sd["data"], dict) else [])
             for s in sl:
                 se = s.get("se", 1)
-                all_ep = s.get("allEp", "") or ""
-                ep_nums = []
-                if all_ep:
-                    for e in all_ep.split(","):
-                        e = e.strip()
-                        if e.isdigit():
-                            eps.append((se, int(e)))
-                            ep_nums.append(int(e))
-                else:
-                    for e in range(1, s.get("maxEp", 0) + 1):
-                        eps.append((se, e))
-                        ep_nums.append(e)
+                # Ask the resource API what's REALLY available
+                available = mb_resource_all(arabic_id, se, QUALITY)
+                if not available:
+                    log(f"  S{se}: no {QUALITY}p episodes available")
+                    continue
+                season_resources_cache[se] = available
+                ep_nums = sorted(available.keys())
+                for e in ep_nums:
+                    eps.append((se, e))
                 season_info.append({"season": se, "episodes": ep_nums})
+                log(f"  S{se}: {len(ep_nums)} episodes available")
     if not eps:
         eps = [(1, 1)]
         season_info = [{"season": 1, "episodes": [1]}]
@@ -481,16 +516,16 @@ def process_title(subject_id, claim_sha):
         ia_upload(aid, tdir / cover_remote, cover_remote)
         log(f"  Cover uploaded")
 
+    # Use resources cache built during season resolution above
     for ek, ei in ep_dict.items():
         heartbeat(subject_id)
         se, ep = ei["season"], ei["episode"]
         log(f"    {ek}...")
 
-        res = mb_resource(arabic_id, se, ep, QUALITY)
-        if not res or "data" not in res or not res["data"].get("list"):
+        r0 = season_resources_cache.get(se, {}).get(ep)
+        if not r0:
             log(f"    {ek}: no source"); update_episode(subject_id, ek, "no_source"); continue
 
-        r0 = res["data"]["list"][0]
         dl_url = r0.get("resourceLink",""); fsize = r0.get("size","0"); rez = r0.get("resolution",0)
         if not dl_url: update_episode(subject_id, ek, "no_link"); continue
 
