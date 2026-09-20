@@ -26,9 +26,28 @@ jobs:
     timeout-minutes: 330
     strategy:
       matrix:
-        worker_num: [1]
+        include:
+          - {n: 1,  account: fghjjhgf040}
+          - {n: 2,  account: fghjjhgf040}
+          - {n: 3,  account: fghjjhgf040}
+          - {n: 4,  account: fghjjhgf040}
+          - {n: 5,  account: fghjjhgf040}
+          - {n: 6,  account: fghjjhgf040}
+          - {n: 7,  account: kkwxx50}
+          - {n: 8,  account: kkwxx50}
+          - {n: 9,  account: kkwxx50}
+          - {n: 10, account: kkwxx50}
+          - {n: 11, account: kkwxx50}
+          - {n: 12, account: kkwxx50}
+          - {n: 13, account: kkwxx50}
+          - {n: 14, account: lixlix870}
+          - {n: 15, account: lixlix870}
+          - {n: 16, account: lixlix870}
+          - {n: 17, account: lixlix870}
+          - {n: 18, account: lixlix870}
+          - {n: 19, account: lixlix870}
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 19
 
     steps:
       - name: Checkout
@@ -39,7 +58,6 @@ jobs:
         with:
           python-version: "3.11"
 
-
       - name: Install dependencies
         run: pip install --disable-pip-version-check -q requests internetarchive
 
@@ -47,10 +65,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.DB_GITHUB_TOKEN }}
           DB_REPO: ${{ secrets.DB_REPO }}
-          IA_ACCESS: ${{ secrets.IA_ACCESS }}
-          IA_SECRET: ${{ secrets.IA_SECRET }}
-          IA_ACCOUNT: ${{ secrets.IA_ACCOUNT }}
-          WORKER_ID: "gha-w${{ matrix.worker_num }}-${{ github.run_number }}"
+          IA_ACCESS: ${{ secrets[format('IA_ACCESS_{0}', matrix.account)] || secrets.IA_ACCESS }}
+          IA_SECRET: ${{ secrets[format('IA_SECRET_{0}', matrix.account)] || secrets.IA_SECRET }}
+          IA_ACCOUNT: ${{ matrix.account }}
+          WORKER_ID: "gha-w${{ matrix.n }}-${{ github.run_number }}"
           MODE: ${{ github.event.inputs.mode || 'both' }}
           MAX_TITLES: ${{ github.event.inputs.max_titles || '3' }}
           QUALITY: ${{ github.event.inputs.quality || '1080' }}
