@@ -1,0 +1,61 @@
+name: MovieBox Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "discover / download / both"
+        default: "both"
+        type: choice
+        options: [both, discover, download]
+      max_titles:
+        description: "Max titles per worker"
+        default: "3"
+      quality:
+        description: "Video quality"
+        default: "1080"
+        type: choice
+        options: ["1080", "720", "480"]
+
+  schedule:
+    - cron: "17 */6 * * *"
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      matrix:
+        worker_num: [1, 2, 3]
+      fail-fast: false
+      max-parallel: 3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests internetarchive
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h
+
+      - name: Run worker
+        env:
+          GITHUB_TOKEN: ${{ secrets.DB_GITHUB_TOKEN }}
+          DB_REPO: ${{ secrets.DB_REPO }}
+          IA_ACCESS: ${{ secrets.IA_ACCESS }}
+          IA_SECRET: ${{ secrets.IA_SECRET }}
+          IA_ACCOUNT: ${{ secrets.IA_ACCOUNT }}
+          WORKER_ID: "gha-w${{ matrix.worker_num }}-${{ github.run_number }}"
+          MODE: ${{ github.event.inputs.mode || 'both' }}
+          MAX_TITLES: ${{ github.event.inputs.max_titles || '3' }}
+          QUALITY: ${{ github.event.inputs.quality || '1080' }}
+        run: python worker.py
