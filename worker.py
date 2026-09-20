@@ -138,15 +138,22 @@ def save_title(subject_id, data, sha):
                     msg=f"{WORKER_ID} updates {subject_id}")
 
 def update_episode(subject_id, ep_key, status, extra=None):
-    data, sha = gh_read(f"titles/{subject_id}.json")
-    if not data:
-        return
-    if ep_key in data.get("episodes", {}):
+    """Retry on sha conflicts — multiple parallel workers writing to same title file."""
+    for attempt in range(10):
+        data, sha = gh_read(f"titles/{subject_id}.json")
+        if not data:
+            return
+        if ep_key not in data.get("episodes", {}):
+            return
         data["episodes"][ep_key]["status"] = status
         if extra:
             data["episodes"][ep_key].update(extra)
         data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        save_title(subject_id, data, sha)
+        result = save_title(subject_id, data, sha)
+        if result is not None:
+            return
+        # 409 conflict — another thread wrote first, re-read and retry
+        time.sleep(random.uniform(0.5, 2))
 
 def heartbeat(subject_id):
     data, sha = gh_read(f"titles/{subject_id}.json")
@@ -336,20 +343,27 @@ def _ia():
 def ia_exists(ident):
     return _ia().get_item(ident).exists
 
-def ia_upload(ident, local, remote, md=None):
+def ia_upload(ident, local, remote, md=None, is_last=False, size_hint=None):
+    """Upload to Archive.org. Optimized headers per IAS3 docs:
+    - verify=False: skip client-side SHA1 recompute (minutes saved per big file)
+    - queue_derive on last file only: derive triggered once, not per-file
+    - x-archive-interactive-priority: express queue lane
+    - x-archive-size-hint: pre-allocate storage
+    - retries=10: IA 503 SlowDown is common under load"""
     s = _ia()
     m = md or {}; m.setdefault("mediatype","movies"); m.setdefault("collection","opensource_movies")
-    # verify=False + queue_derive=False: skip client-side SHA1 recompute + skip server re-derive queue trigger.
-    # We trust the direct MP4 from moviebox — Archive.org verifies MD5 server-side anyway.
-    for a in range(5):
+    headers = {"x-archive-interactive-priority": "1"}
+    if size_hint:
+        headers["x-archive-size-hint"] = str(size_hint)
+    for a in range(6):
         try:
-            s.get_item(ident).upload({remote:str(local)}, metadata=m,
-                                     verify=False, queue_derive=False,
-                                     retries=2, retries_sleep=3)
+            s.get_item(ident).upload({remote:str(local)}, metadata=m, headers=headers,
+                                     verify=False, queue_derive=is_last,
+                                     retries=10, retries_sleep=5)
             return True
         except Exception as e:
             if "SlowDown" in str(e) or "503" in str(e): time.sleep(30*(a+1))
-            elif a >= 4: raise
+            elif a >= 5: raise
             else: time.sleep(5)
     return False
 
@@ -571,35 +585,70 @@ def process_title(subject_id, claim_sha):
         ia_upload(aid, tdir / cover_remote, cover_remote)
         log(f"  Cover uploaded")
 
-    # Use resources cache built during season resolution above
-    for ek, ei in ep_dict.items():
-        heartbeat(subject_id)
-        se, ep = ei["season"], ei["episode"]
-        log(f"    {ek}...")
+    # Parallel pipeline: 4 workers each doing dl+upload independently.
+    # Each thread claims one episode from the queue, downloads it, uploads it, deletes local file, next.
+    # This keeps both network legs busy — while one thread waits on IA upload another is downloading.
+    ep_items = list(ep_dict.items())
+    total_bytes_hint = sum(int(season_resources_cache.get(ei["season"], {}).get(ei["episode"], {}).get("size", 0) or 0)
+                            for _, ei in ep_items)
+    PARALLEL_EPISODES = 4
 
-        r0 = season_resources_cache.get(se, {}).get(ep)
-        if not r0:
-            log(f"    {ek}: no source"); update_episode(subject_id, ek, "no_source"); continue
+    ep_queue = list(enumerate(ep_items))  # (idx, (ek, ei))
+    qlock = threading.Lock()
+    hb_lock = threading.Lock()
+    last_hb = [time.time()]
 
-        dl_url = r0.get("resourceLink",""); fsize = r0.get("size","0"); rez = r0.get("resolution",0)
-        if not dl_url: update_episode(subject_id, ek, "no_link"); continue
+    def _next_ep():
+        with qlock:
+            return ep_queue.pop(0) if ep_queue else None
 
-        fn = f"{aid}_movie.mp4" if ttype == "movie" else f"{aid}_{ek}.mp4"
-        lp = edir / fn
-        log(f"    {ek}: dl {rez}p {int(fsize)/(1024*1024):.0f}MB")
+    def _pipeline_worker(worker_slot):
+        while True:
+            item = _next_ep()
+            if item is None: return
+            idx, (ek, ei) = item
+            is_last_ep = (idx == len(ep_items) - 1)
+            se, ep = ei["season"], ei["episode"]
 
-        if not dl_file(dl_url, lp, fsize):
-            update_episode(subject_id, ek, "download_failed"); continue
+            # Heartbeat at most every 60s from any thread
+            with hb_lock:
+                if time.time() - last_hb[0] > 60:
+                    try: heartbeat(subject_id)
+                    except Exception: pass
+                    last_hb[0] = time.time()
 
-        log(f"    {ek}: uploading")
-        try:
-            ia_upload(aid, lp, f"epmm/{fn}")
-            update_episode(subject_id, ek, "uploaded", {"resolution": rez, "size": int(fsize)})
-            log(f"    {ek}: ok")
-        except Exception as e:
-            log(f"    {ek}: upload fail {e}")
-            update_episode(subject_id, ek, "upload_failed", {"error": str(e)[:200]})
-        lp.unlink(missing_ok=True)
+            r0 = season_resources_cache.get(se, {}).get(ep)
+            if not r0:
+                log(f"    [{worker_slot}] {ek}: no source"); update_episode(subject_id, ek, "no_source"); continue
+
+            dl_url = r0.get("resourceLink",""); fsize = r0.get("size","0"); rez = r0.get("resolution",0)
+            if not dl_url:
+                update_episode(subject_id, ek, "no_link"); continue
+
+            fn = f"{aid}_movie.mp4" if ttype == "movie" else f"{aid}_{ek}.mp4"
+            lp = edir / fn
+            log(f"    [{worker_slot}] {ek}: dl {rez}p {int(fsize)/(1024*1024):.0f}MB")
+
+            # Fewer per-file connections (2) since we're running 4 in parallel = 8 total socket count
+            if not dl_file(dl_url, lp, fsize, connections=2):
+                update_episode(subject_id, ek, "download_failed"); continue
+
+            log(f"    [{worker_slot}] {ek}: uploading")
+            try:
+                ia_upload(aid, lp, f"epmm/{fn}", is_last=is_last_ep, size_hint=total_bytes_hint if idx == 0 else None)
+                update_episode(subject_id, ek, "uploaded", {"resolution": rez, "size": int(fsize)})
+                log(f"    [{worker_slot}] {ek}: ok")
+            except Exception as e:
+                log(f"    [{worker_slot}] {ek}: upload fail {e}")
+                update_episode(subject_id, ek, "upload_failed", {"error": str(e)[:200]})
+            lp.unlink(missing_ok=True)
+
+    log(f"  starting {PARALLEL_EPISODES} parallel episode workers ({len(ep_items)} episodes)")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=PARALLEL_EPISODES) as tex:
+        futs = [tex.submit(_pipeline_worker, i+1) for i in range(PARALLEL_EPISODES)]
+        for f in concurrent.futures.as_completed(futs):
+            try: f.result()
+            except Exception as e: log(f"  pipeline worker crashed: {e}")
 
     data, sha = gh_read(f"titles/{subject_id}.json")
     if data:
