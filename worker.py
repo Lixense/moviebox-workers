@@ -465,8 +465,11 @@ def dl_file(url, dest_path, expected_size=None, connections=8):
 
 # =============================== DISCOVERY ================================
 def discover(max_pages=50):
+    """Only add movies (subjectType=1) and series (subjectType=2).
+    Skip subjectType=6 (user-uploaded music videos) — those pollute the queue."""
     log("Discovering...")
     found = []
+    skipped_junk = 0
     for pg in range(1, max_pages + 1):
         data = mb_catalog(pg)
         if not data or "data" not in data: break
@@ -474,15 +477,20 @@ def discover(max_pages=50):
         if not items: break
         for it in items:
             sid = str(it.get("subjectId", ""))
-            if sid: found.append(sid)
-        log(f"  Page {pg}: {len(items)} items")
+            st = it.get("subjectType", 0)
+            if not sid: continue
+            if st not in (1, 2):
+                skipped_junk += 1
+                continue
+            found.append(sid)
+        log(f"  Page {pg}: {len(items)} items ({skipped_junk} junk skipped so far)")
         if not data["data"].get("pager",{}).get("hasMore"): break
         time.sleep(0.5)
     if found:
         added = add_to_queue(found)
-        log(f"Discovery: {len(found)} seen, {added} new")
+        log(f"Discovery: {len(found)} real titles seen, {skipped_junk} junk skipped, {added} new")
     else:
-        log("Discovery: nothing")
+        log(f"Discovery: nothing found ({skipped_junk} junk skipped)")
 
 # ============================ PROCESS TITLE ===============================
 def process_title(subject_id, claim_sha):
@@ -492,7 +500,19 @@ def process_title(subject_id, claim_sha):
     detail = mb_detail(subject_id)
     dd = detail.get("data", {}) if detail else {}
     tname = dd.get("title", "Unknown")
-    ttype = "movie" if dd.get("subjectType") == 1 else "series"
+    st = dd.get("subjectType", 0)
+    # Reject non-movie/series (subjectType 6 = user-uploaded music, etc.)
+    if st not in (1, 2):
+        log(f"  {tname}: not a movie/series (type={st}) — blacklisting")
+        add_to_blacklist(subject_id, tname, f"type_{st}", "not_movie_or_series")
+        _, sha0 = gh_read(f"titles/{subject_id}.json")
+        if sha0:
+            req_lib.delete(f"{GH}/repos/{DB_REPO}/contents/titles/{subject_id}.json",
+                           headers=GH_H,
+                           json={"message": f"{WORKER_ID} rejects type_{st} {subject_id}", "sha": sha0},
+                           timeout=30)
+        return
+    ttype = "movie" if st == 1 else "series"
     description = dd.get("description", "")
     genre = dd.get("genre", "")
     country = dd.get("countryName", "")
