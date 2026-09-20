@@ -26,9 +26,9 @@ jobs:
     timeout-minutes: 330
     strategy:
       matrix:
-        worker_num: [1, 2, 3]
+        worker_num: [1]
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 1
 
     steps:
       - name: Checkout
