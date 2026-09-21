@@ -5,12 +5,17 @@ on:
     inputs:
       max_titles:
         description: "Max titles per worker"
-        default: "2"
+        default: "1"
       quality:
         description: "Video quality"
         default: "720"
         type: choice
         options: ["1080", "720", "480"]
+      workers:
+        description: "Number of workers"
+        default: "1"
+        type: choice
+        options: ["1", "2", "3"]
 
 jobs:
   worker:
@@ -18,9 +23,8 @@ jobs:
     timeout-minutes: 330
     strategy:
       matrix:
-        n: [1, 2, 3]
+        n: [1]
       fail-fast: false
-      max-parallel: 3
 
     steps:
       - name: Checkout
@@ -36,20 +40,14 @@ jobs:
 
       - name: Setup Local Telegram Bot API Server
         run: |
-          wget -q https://github.com/tdlib/telegram-bot-api/releases/download/v8.6/telegram-bot-api-linux-x86_64.tar.gz || true
-          if [ -f telegram-bot-api-linux-x86_64.tar.gz ]; then
-            tar xzf telegram-bot-api-linux-x86_64.tar.gz 2>/dev/null || true
-          fi
-          if [ -f telegram-bot-api ]; then
-            chmod +x telegram-bot-api
-            ./telegram-bot-api --api-id=${{ secrets.TG_API_ID }} --api-hash=${{ secrets.TG_API_HASH }} --local --dir=/tmp/tg-data &
-            sleep 5
-            echo "TG_API_BASE=http://localhost:8081" >> $GITHUB_ENV
-            echo "Local Bot API running"
-          else
-            echo "TG_API_BASE=https://api.telegram.org" >> $GITHUB_ENV
-            echo "Using standard API (50MB limit)"
-          fi
+          wget -q https://github.com/coyotle/telegram-bot-api-bin/releases/latest/download/telegram-bot-api
+          chmod +x telegram-bot-api
+          mkdir -p /tmp/tg-data
+          ./telegram-bot-api --api-id=${{ secrets.TG_API_ID }} --api-hash=${{ secrets.TG_API_HASH }} --local --dir=/tmp/tg-data &
+          sleep 8
+          curl -s http://localhost:8081/bot${{ secrets.TG_BOT_TOKEN }}/getMe | head -c 100
+          echo ""
+          echo "Local Bot API ready (2GB uploads enabled)"
 
       - name: Run worker
         env:
@@ -58,7 +56,8 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_1: ${{ secrets.TG_CHAT_1 }}
           TG_CHAT_2: ${{ secrets.TG_CHAT_2 }}
+          TG_API_BASE: "http://localhost:8081"
           WORKER_ID: "tg-w${{ matrix.n }}-${{ github.run_number }}"
-          MAX_TITLES: ${{ github.event.inputs.max_titles || '2' }}
+          MAX_TITLES: ${{ github.event.inputs.max_titles || '1' }}
           QUALITY: ${{ github.event.inputs.quality || '720' }}
         run: python tg_worker.py
