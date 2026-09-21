@@ -636,7 +636,6 @@ def process_title(subject_id, claim_sha):
     ia_upload(aid, itxt, "in.txt", {"mediatype": "movies", "collection": "opensource_movies",
                                      "title": aid, "description": "media archive"})
     # cover skipped for speed — cover_url is in in.txt metadata if needed later
-        log(f"  Cover uploaded")
 
     # Parallel pipeline: 4 workers each doing dl+upload independently.
     # Each thread claims one episode from the queue, downloads it, uploads it, deletes local file, next.
