@@ -5,17 +5,15 @@ on:
     inputs:
       max_titles:
         description: "Max titles per worker"
-        default: "1"
+        default: "3"
       quality:
         description: "Video quality"
         default: "720"
         type: choice
         options: ["1080", "720", "480"]
-      workers:
-        description: "Number of workers"
-        default: "1"
-        type: choice
-        options: ["1", "2", "3"]
+
+  schedule:
+    - cron: "17 */6 * * *"
 
 jobs:
   worker:
@@ -23,8 +21,9 @@ jobs:
     timeout-minutes: 330
     strategy:
       matrix:
-        n: [1]
+        n: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
       fail-fast: false
+      max-parallel: 19
 
     steps:
       - name: Checkout
@@ -45,9 +44,7 @@ jobs:
           mkdir -p /tmp/tg-data
           ./telegram-bot-api --api-id=${{ secrets.TG_API_ID }} --api-hash=${{ secrets.TG_API_HASH }} --local --dir=/tmp/tg-data &
           sleep 8
-          curl -s http://localhost:8081/bot${{ secrets.TG_BOT_TOKEN }}/getMe | head -c 100
-          echo ""
-          echo "Local Bot API ready (2GB uploads enabled)"
+          echo "Local Bot API ready"
 
       - name: Run worker
         env:
@@ -58,6 +55,6 @@ jobs:
           TG_CHAT_2: ${{ secrets.TG_CHAT_2 }}
           TG_API_BASE: "http://localhost:8081"
           WORKER_ID: "tg-w${{ matrix.n }}-${{ github.run_number }}"
-          MAX_TITLES: ${{ github.event.inputs.max_titles || '1' }}
+          MAX_TITLES: ${{ github.event.inputs.max_titles || '3' }}
           QUALITY: ${{ github.event.inputs.quality || '720' }}
         run: python tg_worker.py

@@ -338,8 +338,24 @@ def process_title(sid, claim_sha):
         else:
             log(f"  {ek}: upload failed")
 
-    # Run 2 episodes in parallel (one downloading while other uploads)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    # Upload in.txt metadata to Telegram
+    meta = json.dumps({"subject_id": sid, "arabic_id": arabic_id, "title": tname, "type": ttype,
+        "description": dd.get("description",""), "genre": dd.get("genre",""),
+        "country": dd.get("countryName",""), "language": dd.get("language",""),
+        "imdb_rating": dd.get("imdbRatingValue",""), "release_date": dd.get("releaseDate",""),
+        "cover_url": dd.get("cover",{}).get("url",""),
+        "seasons": [{"season": se, "episodes": sorted(sc.get(se,{}).keys())} for se in sorted(sc.keys())],
+        "total_episodes": len(eps), "quality": QUALITY, "source": "moviebox"
+    }, ensure_ascii=False, indent=2)
+    intxt = WORK_DIR / f"{sid}_in.txt"
+    intxt.write_text(base64.b64encode(meta.encode()).decode())
+    requests.post(f"{TG_API}/bot{TG_TOKEN}/sendDocument",
+        data={"chat_id": chat_id, "caption": f"[{tname}] metadata"},
+        files={"document": (f"{sid}_in.txt", open(intxt,"rb"))}, timeout=60)
+    intxt.unlink(missing_ok=True)
+
+    # Run 4 episodes in parallel (download+upload pipeline)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         futs = [pool.submit(do_episode, se, ep) for se, ep in eps]
         for f in concurrent.futures.as_completed(futs):
             try: f.result()
