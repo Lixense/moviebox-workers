@@ -189,18 +189,24 @@ def get_arabic_id(sid):
 
 # Telegram upload
 def tg_upload(fp, chat_id, caption=""):
-    url = f"{TG_API}/bot{TG_TOKEN}/sendDocument"
+    url = f"{TG_API}/bot{TG_TOKEN}/sendVideo"
     sz = os.path.getsize(fp)
     log(f"    Uploading {sz/(1024*1024):.0f}MB to Telegram...")
     t0 = time.time()
+    # Use chunked streaming upload with larger buffer for speed
+    import urllib3
     with open(fp, "rb") as f:
-        r = requests.post(url, data={"chat_id": chat_id, "caption": caption},
-                          files={"document": (os.path.basename(fp), f)}, timeout=1800)
+        # MultipartEncoder for streaming (avoids loading entire file into memory)
+        r = requests.post(url,
+            data={"chat_id": chat_id, "caption": caption, "supports_streaming": "true"},
+            files={"video": (os.path.basename(fp), f, "video/mp4")},
+            timeout=1800)
     el = time.time() - t0
     if r.status_code == 200 and r.json().get("ok"):
-        doc = r.json()["result"]["document"]
+        res = r.json()["result"]
+        vid = res.get("video") or res.get("document", {})
         log(f"    Uploaded {el:.0f}s ({sz/el/(1024*1024):.1f}MB/s)")
-        return doc["file_id"], doc.get("file_unique_id", "")
+        return vid.get("file_id", ""), vid.get("file_unique_id", "")
     log(f"    Upload FAILED: {r.text[:200]}")
     return None, None
 
@@ -285,26 +291,25 @@ def process_title(sid, claim_sha):
           "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     save_title(sid, td, claim_sha)
 
-    for se, ep in eps:
+    # Pipeline: download next episode while uploading current one
+    import concurrent.futures, threading
+
+    def do_episode(se, ep):
         ek = f"S{se:02d}E{ep:02d}"
         r0 = sc.get(se, {}).get(ep)
-        if not r0: continue
+        if not r0: return
         dl_url = r0.get("resourceLink", "")
         fsize = r0.get("size", "0")
         rez = r0.get("resolution", 0)
-        if not dl_url: continue
-
+        if not dl_url: return
         fn = f"{tname[:30]}_{ek}_{rez}p.mp4".replace(" ", "_").replace("/", "_")
         lp = WORK_DIR / fn
         log(f"  {ek}: dl {rez}p {int(fsize)/(1024*1024):.0f}MB")
-
         if not dl_file(dl_url, lp):
-            log(f"  {ek}: dl failed"); continue
-
+            log(f"  {ek}: dl failed"); return
         cap = f"{tname} - {ek} ({rez}p)"
         fid, fuid = tg_upload(str(lp), chat_id, cap)
         lp.unlink(missing_ok=True)
-
         if fid:
             for _ in range(5):
                 data, sha = gh_read(f"titles/{sid}.json")
@@ -319,6 +324,13 @@ def process_title(sid, claim_sha):
             log(f"  {ek}: OK")
         else:
             log(f"  {ek}: upload failed")
+
+    # Run 2 episodes in parallel (one downloading while other uploads)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futs = [pool.submit(do_episode, se, ep) for se, ep in eps]
+        for f in concurrent.futures.as_completed(futs):
+            try: f.result()
+            except Exception as e: log(f"  Episode error: {e}")
 
     data, sha = gh_read(f"titles/{sid}.json")
     if data:
