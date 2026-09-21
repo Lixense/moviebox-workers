@@ -188,24 +188,27 @@ def get_arabic_id(sid):
     return str(sid)
 
 # Telegram upload
-def tg_upload(fp, chat_id, caption=""):
+def tg_upload(fp, chat_id, caption="", duration=0, width=0, height=0):
     sz = os.path.getsize(fp)
     log(f"    Uploading {sz/(1024*1024):.0f}MB to Telegram...")
     t0 = time.time()
     is_local = TG_API.startswith("http://localhost")
     if is_local:
-        # Local Bot API: use file:// path (zero-copy, fastest possible)
         abs_path = os.path.abspath(fp)
-        r = requests.post(f"{TG_API}/bot{TG_TOKEN}/sendVideo",
-            json={"chat_id": chat_id, "video": f"file://{abs_path}",
-                  "caption": caption, "supports_streaming": True},
-            timeout=1800)
+        payload = {"chat_id": chat_id, "video": f"file://{abs_path}",
+                   "caption": caption, "supports_streaming": True}
+        if duration: payload["duration"] = duration
+        if width: payload["width"] = width
+        if height: payload["height"] = height
+        r = requests.post(f"{TG_API}/bot{TG_TOKEN}/sendVideo", json=payload, timeout=1800)
     else:
-        # Standard API: multipart upload
+        data = {"chat_id": chat_id, "caption": caption, "supports_streaming": "true"}
+        if duration: data["duration"] = str(duration)
+        if width: data["width"] = str(width)
+        if height: data["height"] = str(height)
         with open(fp, "rb") as f:
-            r = requests.post(f"{TG_API}/bot{TG_TOKEN}/sendDocument",
-                data={"chat_id": chat_id, "caption": caption},
-                files={"document": (os.path.basename(fp), f)},
+            r = requests.post(f"{TG_API}/bot{TG_TOKEN}/sendVideo",
+                data=data, files={"video": (os.path.basename(fp), f, "video/mp4")},
                 timeout=1800)
     el = time.time() - t0
     if r.status_code == 200 and r.json().get("ok"):
@@ -314,7 +317,11 @@ def process_title(sid, claim_sha):
         if not dl_file(dl_url, lp):
             log(f"  {ek}: dl failed"); return
         cap = f"{tname} - {ek} ({rez}p)"
-        fid, fuid = tg_upload(str(lp), chat_id, cap)
+        dur = r0.get("duration", 0)
+        # Resolution → width/height (assume 16:9)
+        vid_h = rez if rez else 720
+        vid_w = int(vid_h * 16 / 9)
+        fid, fuid = tg_upload(str(lp), chat_id, cap, duration=dur, width=vid_w, height=vid_h)
         lp.unlink(missing_ok=True)
         if fid:
             for _ in range(5):
