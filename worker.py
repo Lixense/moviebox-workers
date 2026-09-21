@@ -657,7 +657,7 @@ def process_title(subject_id, claim_sha):
     ep_items = list(ep_dict.items())
     total_bytes_hint = sum(int(season_resources_cache.get(ei["season"], {}).get(ei["episode"], {}).get("size", 0) or 0)
                             for _, ei in ep_items)
-    PARALLEL_EPISODES = 4
+    PARALLEL_EPISODES = 2
 
     ep_queue = list(enumerate(ep_items))  # (idx, (ek, ei))
     qlock = threading.Lock()
