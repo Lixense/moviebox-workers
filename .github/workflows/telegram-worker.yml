@@ -1,0 +1,64 @@
+name: Telegram Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_titles:
+        description: "Max titles per worker"
+        default: "2"
+      quality:
+        description: "Video quality"
+        default: "720"
+        type: choice
+        options: ["1080", "720", "480"]
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      matrix:
+        n: [1, 2, 3]
+      fail-fast: false
+      max-parallel: 3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -q requests
+
+      - name: Setup Local Telegram Bot API Server
+        run: |
+          wget -q https://github.com/tdlib/telegram-bot-api/releases/download/v8.6/telegram-bot-api-linux-x86_64.tar.gz || true
+          if [ -f telegram-bot-api-linux-x86_64.tar.gz ]; then
+            tar xzf telegram-bot-api-linux-x86_64.tar.gz 2>/dev/null || true
+          fi
+          if [ -f telegram-bot-api ]; then
+            chmod +x telegram-bot-api
+            ./telegram-bot-api --api-id=${{ secrets.TG_API_ID }} --api-hash=${{ secrets.TG_API_HASH }} --local --dir=/tmp/tg-data &
+            sleep 5
+            echo "TG_API_BASE=http://localhost:8081" >> $GITHUB_ENV
+            echo "Local Bot API running"
+          else
+            echo "TG_API_BASE=https://api.telegram.org" >> $GITHUB_ENV
+            echo "Using standard API (50MB limit)"
+          fi
+
+      - name: Run worker
+        env:
+          GITHUB_TOKEN: ${{ secrets.DB_GITHUB_TOKEN }}
+          DB_REPO: ${{ secrets.DB_REPO }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_1: ${{ secrets.TG_CHAT_1 }}
+          TG_CHAT_2: ${{ secrets.TG_CHAT_2 }}
+          WORKER_ID: "tg-w${{ matrix.n }}-${{ github.run_number }}"
+          MAX_TITLES: ${{ github.event.inputs.max_titles || '2' }}
+          QUALITY: ${{ github.event.inputs.quality || '720' }}
+        run: python tg_worker.py
