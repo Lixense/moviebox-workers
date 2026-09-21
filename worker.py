@@ -748,7 +748,7 @@ def process_title(subject_id, claim_sha):
             save_title(subject_id, data, sha)
 
     shutil.rmtree(tdir, ignore_errors=True)
-    log(f"  {tname} complete!")
+    log(f"  {tname} complete! -> https://archive.org/details/{aid}")
 
 # ================================= MAIN ==================================
 def log(msg):
