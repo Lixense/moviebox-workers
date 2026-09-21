@@ -189,18 +189,24 @@ def get_arabic_id(sid):
 
 # Telegram upload
 def tg_upload(fp, chat_id, caption=""):
-    url = f"{TG_API}/bot{TG_TOKEN}/sendVideo"
     sz = os.path.getsize(fp)
     log(f"    Uploading {sz/(1024*1024):.0f}MB to Telegram...")
     t0 = time.time()
-    # Use chunked streaming upload with larger buffer for speed
-    import urllib3
-    with open(fp, "rb") as f:
-        # MultipartEncoder for streaming (avoids loading entire file into memory)
-        r = requests.post(url,
-            data={"chat_id": chat_id, "caption": caption, "supports_streaming": "true"},
-            files={"video": (os.path.basename(fp), f, "video/mp4")},
+    is_local = TG_API.startswith("http://localhost")
+    if is_local:
+        # Local Bot API: use file:// path (zero-copy, fastest possible)
+        abs_path = os.path.abspath(fp)
+        r = requests.post(f"{TG_API}/bot{TG_TOKEN}/sendVideo",
+            json={"chat_id": chat_id, "video": f"file://{abs_path}",
+                  "caption": caption, "supports_streaming": True},
             timeout=1800)
+    else:
+        # Standard API: multipart upload
+        with open(fp, "rb") as f:
+            r = requests.post(f"{TG_API}/bot{TG_TOKEN}/sendDocument",
+                data={"chat_id": chat_id, "caption": caption},
+                files={"document": (os.path.basename(fp), f)},
+                timeout=1800)
     el = time.time() - t0
     if r.status_code == 200 and r.json().get("ok"):
         res = r.json()["result"]
