@@ -604,19 +604,7 @@ def process_title(subject_id, claim_sha):
     tdir = WORK_DIR / aid; tdir.mkdir(exist_ok=True)
     edir = tdir / "epmm"; edir.mkdir(exist_ok=True)
 
-    # Download cover image
     cover_remote = None
-    if cover_url:
-        cover_ext = cover_fmt if cover_fmt in ("jpg", "png", "webp") else "jpg"
-        cover_local = tdir / f"{aid}_cover.{cover_ext}"
-        log(f"  Downloading cover...")
-        try:
-            cr = req_lib.get(cover_url, timeout=30)
-            if cr.status_code == 200:
-                cover_local.write_bytes(cr.content)
-                cover_remote = f"{aid}_cover.{cover_ext}"
-        except Exception:
-            pass
 
     # Build rich in.txt metadata
     meta = {
@@ -647,8 +635,7 @@ def process_title(subject_id, claim_sha):
     # Upload in.txt + cover
     ia_upload(aid, itxt, "in.txt", {"mediatype": "movies", "collection": "opensource_movies",
                                      "title": aid, "description": "media archive"})
-    if cover_remote:
-        ia_upload(aid, tdir / cover_remote, cover_remote)
+    # cover skipped for speed — cover_url is in in.txt metadata if needed later
         log(f"  Cover uploaded")
 
     # Parallel pipeline: 4 workers each doing dl+upload independently.
